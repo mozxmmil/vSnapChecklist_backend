@@ -1,6 +1,6 @@
 import { prisma } from "../config/database";
 import { getPaginationParams, buildPaginationMeta } from "../utils/pagination";
-import type { CreateTemplateInput, UpdateTemplateInput, TemplateQueryInput } from "../schemas/template.schemas";
+import type { CreateTemplateInput, UpdateTemplateInput, TemplateQueryInput, ImportTemplatesInput } from "../schemas/template.schemas";
 
 export const templateService = {
   async getAll(query: TemplateQueryInput) {
@@ -11,19 +11,39 @@ export const templateService = {
     if (query.assignedUserId) where.assignedUserId = query.assignedUserId;
     if (query.frequency) where.frequency = query.frequency;
     if (query.isActive !== undefined) where.isActive = query.isActive;
+    if (query.startDate || query.endDate) {
+      where.startDate = {
+        ...(query.startDate ? { gte: new Date(query.startDate) } : {}),
+        ...(query.endDate ? { lte: new Date(query.endDate) } : {}),
+      };
+    }
     if (query.search) {
       where.OR = [
         { description: { contains: query.search, mode: "insensitive" } },
         { taskCode: { contains: query.search, mode: "insensitive" } },
+        { assignedUser: { username: { contains: query.search, mode: "insensitive" } } },
       ];
     }
+
+    const dir = query.sortDir ?? "asc";
+    const orderByMap: Record<string, object> = {
+      taskCode:     { taskCode: dir },
+      department:   { department: { name: dir } },
+      givenBy:      { givenBy: dir },
+      assignedUser: { assignedUser: { username: dir } },
+      frequency:    { frequency: dir },
+      startDate:    { startDate: dir },
+    };
+    const orderBy = query.sortBy
+      ? [orderByMap[query.sortBy]]
+      : [{ isActive: "desc" }, { createdAt: "desc" }];
 
     const [templates, total] = await Promise.all([
       prisma.taskTemplate.findMany({
         where,
         skip,
         take,
-        orderBy: [{ isActive: "desc" }, { createdAt: "desc" }],
+        orderBy,
         include: {
           department: { select: { id: true, name: true } },
           assignedUser: { select: { id: true, username: true } },
@@ -63,6 +83,7 @@ export const templateService = {
         frequency: input.frequency,
         enableReminders: input.enableReminders ?? true,
         requireAttachment: input.requireAttachment ?? false,
+        sampleImageUrl: input.sampleImageUrl ?? null,
       },
       include: {
         department: { select: { id: true, name: true } },
@@ -94,5 +115,51 @@ export const templateService = {
       where: { id },
       data: { isActive: false },
     });
+  },
+
+  async importMany(input: ImportTemplatesInput) {
+    const results = { created: 0, skipped: 0, errors: [] as string[] };
+
+    for (const t of input) {
+      try {
+        const dept = await prisma.department.findFirst({
+          where: { name: { equals: t.departmentName, mode: "insensitive" } },
+        });
+        if (!dept) {
+          results.errors.push(`${t.taskCode}: department "${t.departmentName}" not found`);
+          continue;
+        }
+
+        const user = await prisma.user.findUnique({ where: { username: t.assignedUsername } });
+        if (!user) {
+          results.errors.push(`${t.taskCode}: user "${t.assignedUsername}" not found`);
+          continue;
+        }
+
+        const exists = await prisma.taskTemplate.findUnique({ where: { taskCode: t.taskCode } });
+        if (exists) { results.skipped++; continue; }
+
+        await prisma.taskTemplate.create({
+          data: {
+            taskCode: t.taskCode,
+            departmentId: dept.id,
+            givenBy: t.givenBy,
+            assignedUserId: user.id,
+            description: t.description,
+            startDate: new Date(t.startDate),
+            lastDate: t.lastDate ? new Date(t.lastDate) : undefined,
+            frequency: t.frequency,
+            enableReminders: t.enableReminders ?? true,
+            requireAttachment: t.requireAttachment ?? false,
+          },
+        });
+        results.created++;
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        results.errors.push(`${t.taskCode}: ${msg}`);
+      }
+    }
+
+    return results;
   },
 };

@@ -35,5 +35,14 @@ export const importUsersSchema = z.array(
   })
 ).min(1).max(200);
 
+export const updateUserDeptsSchema = z.object({
+  departmentIds: z.array(z.number().int().positive()).max(30),
+});
+
+export const updateUserEmployeeLinkSchema = z.object({
+  employeeId: z.number().int().positive().nullable(),
+});
+
 export type CreateUserInput = z.infer<typeof createUserSchema>;
 export type ImportUsersInput = z.infer<typeof importUsersSchema>;
+export type UpdateUserDeptsInput = z.infer<typeof updateUserDeptsSchema>;

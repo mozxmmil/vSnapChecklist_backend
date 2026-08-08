@@ -6,264 +6,1175 @@ datasource db {
   provider = "postgresql"
 }
 
-// ─────────────────────────────────────────
-// USERS & DEPARTMENTS
-// ─────────────────────────────────────────
-
+// `employeeId` links a login account to its HR roster record (Module #53
+// decision) — nullable, since not every User (e.g. admin-only accounts) has
+// a corresponding Employee, and unique, so a given Employee can be "me" for
+// at most one User account. Resolved server-side for self-service HR pages
+// (My Attendance now; My Salary #55 and My Profile #56 will reuse this same
+// field) via req.user.userId -> employeeId -> Employee — never trust a
+// client-supplied employeeId for "my own data" reads. Linking itself is an
+// admin action (PATCH /api/users/:id/employee, mirroring the existing
+// updateDepartment endpoint's shape) — see docs/migration/DECISIONS.md.
 model User {
-  id           Int        @id @default(autoincrement())
-  username     String     @unique
-  passwordHash String
-  email        String?    @unique
-  role         Role       @default(USER)
-  status       UserStatus @default(ACTIVE)
-  departmentId Int?
-  department   Department? @relation(fields: [departmentId], references: [id])
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
-
-  templateTasks     TaskTemplate[]      @relation("TemplateAssignedTo")
-  checklistEntries  ChecklistEntry[]    @relation("EntryAssignedTo")
-  transferredTo     ChecklistEntry[]    @relation("EntryTransferredTo")
-  delegationTasks   DelegationTask[]    @relation("DelegationAssignedTo")
-  delegationHistory DelegationHistory[] @relation("HistorySubmittedBy")
-  attendanceLogs    AttendanceLog[]
-  transfersFrom     TaskTransferLog[]   @relation("TransferFrom")
-  transfersTo       TaskTransferLog[]   @relation("TransferTo")
-  transferredBy     TaskTransferLog[]   @relation("TransferBy")
+  id                       Int                  @id @default(autoincrement())
+  username                 String               @unique
+  passwordHash             String
+  email                    String?              @unique
+  role                     Role                 @default(USER)
+  status                   UserStatus           @default(ACTIVE)
+  departmentId             Int?
+  employeeId               Int?                 @unique
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
+  attendanceLogs           AttendanceLog[]
+  checklistEntries         ChecklistEntry[]     @relation("EntryAssignedTo")
+  transferredTo            ChecklistEntry[]     @relation("EntryTransferredTo")
+  delegationHistory        DelegationHistory[]  @relation("HistorySubmittedBy")
+  delegationHistoryReviewed DelegationHistory[] @relation("DelegationHistoryReviewedBy")
+  delegationTasks          DelegationTask[]     @relation("DelegationAssignedTo")
+  templateTasks            TaskTemplate[]       @relation("TemplateAssignedTo")
+  transfersFrom            TaskTransferLog[]    @relation("TransferFrom")
+  transfersTo              TaskTransferLog[]    @relation("TransferTo")
+  transferredBy            TaskTransferLog[]    @relation("TransferBy")
+  leaveLogs                LeaveLog[]           @relation("LeaveLogFor")
+  leaveLogsMarked          LeaveLog[]           @relation("LeaveLogMarkedBy")
+  transferRequestsFrom     TransferRequest[]    @relation("TransferRequestFrom")
+  transferRequestsTo       TransferRequest[]    @relation("TransferRequestTo")
+  transferRequestsMade     TransferRequest[]    @relation("TransferRequestBy")
+  transferRequestsReviewed TransferRequest[]    @relation("TransferRequestReviewedBy")
+  departments              UserDepartment[]
+  department               Department?          @relation(fields: [departmentId], references: [id])
+  employee                 Employee?            @relation(fields: [employeeId], references: [id])
+  sectionPermissions       SectionPermission[]
+  refreshTokens            RefreshToken[]
+  misTargets               MisWeeklyTarget[]    @relation("MisTargetForUser")
+  misTargetsSet            MisWeeklyTarget[]    @relation("MisTargetSetBy")
+  otpStageEventsActed      OtpStageEvent[]      @relation("OtpStageEventActor")
+  pipelineStageEventsActed PipelineStageEvent[] @relation("PipelineStageEventActor")
+  indentsCreated           Indent[]             @relation("IndentCreatedBy")
+  enquiriesCreated         Enquiry[]            @relation("EnquiryCreatedBy")
+  followUpsCreated         FollowUp[]           @relation("FollowUpCreatedBy")
+  jobApplicationsCreated   JobApplication[]     @relation("JobApplicationCreatedBy")
+  politicalProjectOrdersCreated PoliticalProjectOrder[] @relation("PoliticalProjectOrderCreatedBy")
 
   @@index([username])
   @@index([departmentId])
   @@map("users")
 }
 
-model Department {
-  id        Int      @id @default(autoincrement())
-  name      String   @unique
-  givenBy   String?
-  createdAt DateTime @default(now())
+model SectionPermission {
+  userId     Int
+  sectionKey String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
 
-  users            User[]
-  taskTemplates    TaskTemplate[]
+  @@id([userId, sectionKey])
+  @@index([userId])
+  @@map("section_permissions")
+}
+
+model RefreshToken {
+  id                Int           @id @default(autoincrement())
+  userId            Int
+  tokenHash         String        @unique
+  family            String
+  expiresAt         DateTime
+  revokedAt         DateTime?
+  replacedByTokenId Int?          @unique
+  ipAddress         String?
+  userAgent         String?
+  createdAt         DateTime      @default(now())
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replacedBy        RefreshToken? @relation("TokenRotation", fields: [replacedByTokenId], references: [id], onDelete: SetNull)
+  replacedFrom      RefreshToken? @relation("TokenRotation")
+
+  @@index([userId])
+  @@index([family])
+  @@map("refresh_tokens")
+}
+
+model Department {
+  id               Int              @id @default(autoincrement())
+  name             String           @unique
+  givenBy          String?
+  createdAt        DateTime         @default(now())
   checklistEntries ChecklistEntry[]
   delegationTasks  DelegationTask[]
+  taskTemplates    TaskTemplate[]
+  userLinks        UserDepartment[]
+  users            User[]
 
   @@map("departments")
 }
 
-// ─────────────────────────────────────────
-// TASK TEMPLATES  ("Unique" sheet)
-// One row per unique recurring task per user
-// ─────────────────────────────────────────
+model UserDepartment {
+  userId       Int
+  departmentId Int
+  assignedAt   DateTime   @default(now())
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, departmentId])
+  @@index([userId])
+  @@map("user_departments")
+}
 
 model TaskTemplate {
-  id                Int        @id @default(autoincrement())
-  taskCode          String     @unique // e.g. "T001" — the business Task ID
+  id                Int              @id @default(autoincrement())
+  taskCode          String           @unique
   departmentId      Int
-  department        Department @relation(fields: [departmentId], references: [id])
   givenBy           String
   assignedUserId    Int
-  assignedUser      User       @relation("TemplateAssignedTo", fields: [assignedUserId], references: [id])
   description       String
-  startDate         DateTime   @db.Date // When to begin generating instances
-  lastDate          DateTime?  @db.Date // When to stop (null = indefinite)
+  startDate         DateTime         @db.Date
+  lastDate          DateTime?        @db.Date
   frequency         Frequency
-  enableReminders   Boolean    @default(true)
-  requireAttachment Boolean    @default(false)
-  isActive          Boolean    @default(true)
-  createdAt         DateTime   @default(now())
-  updatedAt         DateTime   @updatedAt
+  enableReminders   Boolean          @default(true)
+  requireAttachment Boolean          @default(false)
+  sampleImageUrl    String?
+  isActive          Boolean          @default(true)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  entries           ChecklistEntry[]
+  assignedUser      User             @relation("TemplateAssignedTo", fields: [assignedUserId], references: [id])
+  department        Department       @relation(fields: [departmentId], references: [id])
 
-  entries ChecklistEntry[]
-
-  @@index([assignedUserId, isActive]) // "My active templates"
-  @@index([frequency, startDate]) // Task generation sweep
+  @@index([assignedUserId, isActive])
+  @@index([frequency, startDate])
   @@index([departmentId])
   @@map("task_templates")
 }
 
-// ─────────────────────────────────────────
-// CHECKLIST ENTRIES  ("Checklist" sheet)
-// One row per day per task instance
-// ─────────────────────────────────────────
-
 model ChecklistEntry {
-  id        BigInt @id @default(autoincrement())
-  templateId Int?
-  template  TaskTemplate? @relation(fields: [templateId], references: [id])
-  taskCode  String // Copied from template at generation time
-
-  // Denormalized for read speed (avoids JOIN on every checklist page load)
+  id                BigInt            @id @default(autoincrement())
+  templateId        Int?
+  taskCode          String
   departmentId      Int
-  department        Department @relation(fields: [departmentId], references: [id])
   givenBy           String
   assignedUserId    Int
-  assignedUser      User       @relation("EntryAssignedTo", fields: [assignedUserId], references: [id])
   description       String
-  taskStartDate     DateTime   @db.Date // The specific date this instance is for
-  taskStartTime     String? // HH:MM stored separately
+  taskStartDate     DateTime          @db.Date
+  taskStartTime     String?
   frequency         Frequency
-  enableReminders   Boolean    @default(true)
-  requireAttachment Boolean    @default(false)
+  enableReminders   Boolean           @default(true)
+  requireAttachment Boolean           @default(false)
+  sampleImageUrl    String?
+  actualDate        DateTime?         @db.Date
+  delayDays         Int?
+  completionStatus  CompletionStatus?
+  remarks           String?
+  uploadedImageUrl  String?
+  adminDone         Boolean           @default(false)
+  leaveStatus       Boolean           @default(false)
+  transferredToId   Int?
+  // Live "on loan" overlay for a temporary transfer — assignedUserId is never
+  // changed by a transfer; while this is set and in the future, the entry is
+  // hidden from Checklist and shown (tagged) on transferredTo's Delegation
+  // page instead. Cleared automatically once expired (see
+  // checklistService.reconcileExpiredTransfers) — no cron, just lazy-on-read.
+  transferValidUntil DateTime?        @db.Date
+  remarks1          String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  assignedUser      User              @relation("EntryAssignedTo", fields: [assignedUserId], references: [id])
+  department        Department        @relation(fields: [departmentId], references: [id])
+  template          TaskTemplate?     @relation(fields: [templateId], references: [id])
+  transferredTo     User?             @relation("EntryTransferredTo", fields: [transferredToId], references: [id])
+  transferLogs      TaskTransferLog[]
 
-  // Completion fields — filled when user submits
-  actualDate       DateTime?        @db.Date // Col K
-  delayDays        Int? // Col L — computed on submit
-  completionStatus CompletionStatus? // Col M — Yes/No/Not Required
-  remarks          String? // Col N
-  uploadedImageUrl String? // Col O
-  adminDone        Boolean          @default(false) // Col P
-  leaveStatus      Boolean          @default(false) // Col Q
-  transferredToId  Int? // Col R — Assign To
-  transferredTo    User?            @relation("EntryTransferredTo", fields: [transferredToId], references: [id])
-  remarks1         String? // Col S
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  transferLogs TaskTransferLog[]
-
-  // ── HOT INDEXES ──
-  @@index([assignedUserId, taskStartDate]) // "My tasks for today" — most used
-  @@index([assignedUserId, taskStartDate, actualDate]) // Pending tasks filter
-  @@index([taskStartDate, assignedUserId]) // Admin: all staff for a date
-  @@index([departmentId, taskStartDate]) // Admin: department view
-  @@index([templateId, taskStartDate]) // Generation dedup check
-  @@unique([templateId, taskStartDate]) // One entry per template per day
+  @@unique([templateId, taskStartDate])
+  @@index([assignedUserId, taskStartDate])
+  @@index([assignedUserId, taskStartDate, actualDate])
+  @@index([taskStartDate, assignedUserId])
+  @@index([departmentId, taskStartDate])
+  @@index([templateId, taskStartDate])
   @@map("checklist_entries")
 }
-
-// ─────────────────────────────────────────
-// DELEGATION TASKS  ("DELEGATION" sheet)
-// One-time / Critical / Urgent tasks
-// ─────────────────────────────────────────
 
 model DelegationTask {
   id                Int                 @id @default(autoincrement())
   taskCode          String              @unique
   departmentId      Int
-  department        Department          @relation(fields: [departmentId], references: [id])
   givenBy           String
   assignedUserId    Int
-  assignedUser      User                @relation("DelegationAssignedTo", fields: [assignedUserId], references: [id])
   description       String
-  taskStartDate     DateTime  // Includes time
-  taskEndDate       DateTime? // Optional end date/time
+  taskStartDate     DateTime
   frequency         DelegationFrequency
   enableReminders   Boolean             @default(true)
   requireAttachment Boolean             @default(false)
+  sampleImageUrl    String?
   status            DelegationStatus    @default(PENDING)
   rating            Int?
-  isDeleted         Boolean             @default(false) // Col V — soft delete
+  isDeleted         Boolean             @default(false)
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
+  taskEndDate       DateTime?
+  history           DelegationHistory[]
+  transferLogs      TaskTransferLog[]
+  assignedUser      User                @relation("DelegationAssignedTo", fields: [assignedUserId], references: [id])
+  department        Department          @relation(fields: [departmentId], references: [id])
 
-  history DelegationHistory[]
-
-  @@index([assignedUserId, status]) // "My active delegation tasks"
-  @@index([taskStartDate, status]) // Date-range dashboard queries
+  @@index([assignedUserId, status])
+  @@index([taskStartDate, status])
   @@index([departmentId])
-  @@index([assignedUserId, isDeleted, status]) // Pending view
+  @@index([assignedUserId, isDeleted, status])
   @@map("delegation_tasks")
 }
 
-// ─────────────────────────────────────────
-// DELEGATION HISTORY  ("DELEGATION DONE" sheet)
-// One row per submission
-// ─────────────────────────────────────────
-
 model DelegationHistory {
-  id                Int            @id @default(autoincrement())
+  id                Int                     @id @default(autoincrement())
   delegationTaskId  Int
-  delegationTask    DelegationTask @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
   submittedByUserId Int
-  submittedBy       User           @relation("HistorySubmittedBy", fields: [submittedByUserId], references: [id])
-
-  submissionDate  DateTime      @db.Date
-  status          HistoryStatus // Done / Extend date
-  nextTargetDate  DateTime?     @db.Date
-  remarks         String?
-  imageUrl        String?
-  taskDescription String // Snapshot at submission time
-  givenBy         String?
-  adminDoneStatus String? // "Done" when admin marks it
-  isLate          Boolean       @default(false) // submitted after deadline?
-
-  createdAt DateTime @default(now())
+  submissionDate    DateTime                @db.Date
+  status            HistoryStatus
+  nextTargetDate    DateTime?               @db.Date
+  remarks           String?
+  imageUrl          String?
+  taskDescription   String
+  givenBy           String?
+  adminDoneStatus   String?
+  isLate            Boolean                 @default(false)
+  createdAt         DateTime                @default(now())
+  // Review gate for "DONE" submissions — null for EXTEND_DATE rows, which
+  // never need admin verification. See delegationService.submit()/
+  // approveSubmission()/rejectSubmission().
+  reviewStatus      DelegationReviewStatus?
+  reviewedByUserId  Int?
+  reviewedAt        DateTime?
+  reviewNote        String?
+  delegationTask    DelegationTask          @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
+  submittedBy       User                    @relation("HistorySubmittedBy", fields: [submittedByUserId], references: [id])
+  reviewedBy        User?                   @relation("DelegationHistoryReviewedBy", fields: [reviewedByUserId], references: [id])
 
   @@index([delegationTaskId])
   @@index([submittedByUserId, submissionDate])
+  @@index([reviewStatus, createdAt])
   @@map("delegation_history")
 }
 
-// ─────────────────────────────────────────
-// TASK TRANSFER LOG  (audit trail)
-// ─────────────────────────────────────────
-
 model TaskTransferLog {
-  id               Int             @id @default(autoincrement())
-  checklistEntryId BigInt?
-  checklistEntry   ChecklistEntry? @relation(fields: [checklistEntryId], references: [id])
-  templateId       Int? // if template was also transferred
-
+  id                  Int             @id @default(autoincrement())
+  checklistEntryId    BigInt?
+  templateId          Int?
+  delegationTaskId    Int?
   fromUserId          Int
-  fromUser            User     @relation("TransferFrom", fields: [fromUserId], references: [id])
   toUserId            Int
-  toUser              User     @relation("TransferTo", fields: [toUserId], references: [id])
   transferredByUserId Int
-  transferredBy       User     @relation("TransferBy", fields: [transferredByUserId], references: [id])
   reason              String?
-  transferredAt       DateTime @default(now())
+  transferredAt       DateTime        @default(now())
+  // The task-date-range this transfer covered ("kab tak" — until when) —
+  // populated only for checklist-entry rows, whose transfers are temporary;
+  // left null for delegation-task rows, which remain a permanent reassignment.
+  validFrom           DateTime?       @db.Date
+  validUntil          DateTime?       @db.Date
+  checklistEntry      ChecklistEntry? @relation(fields: [checklistEntryId], references: [id])
+  delegationTask      DelegationTask? @relation(fields: [delegationTaskId], references: [id])
+  fromUser            User            @relation("TransferFrom", fields: [fromUserId], references: [id])
+  toUser              User            @relation("TransferTo", fields: [toUserId], references: [id])
+  transferredBy       User            @relation("TransferBy", fields: [transferredByUserId], references: [id])
 
   @@index([checklistEntryId])
+  @@index([delegationTaskId])
   @@index([fromUserId, transferredAt])
   @@index([toUserId, transferredAt])
   @@map("task_transfer_logs")
 }
 
-// ─────────────────────────────────────────
-// SYSTEM SETTINGS (global config)
-// ─────────────────────────────────────────
+// Audit trail for markLeave() — the ChecklistEntry.leaveStatus flag it sets
+// carries no memory of who performed the action or when; this does.
+model LeaveLog {
+  id             Int      @id @default(autoincrement())
+  userId         Int
+  markedByUserId Int
+  startDate      DateTime @db.Date
+  endDate        DateTime @db.Date
+  reason         String?
+  markedAt       DateTime @default(now())
+  user           User     @relation("LeaveLogFor", fields: [userId], references: [id])
+  markedBy       User     @relation("LeaveLogMarkedBy", fields: [markedByUserId], references: [id])
+
+  @@index([userId, markedAt])
+  @@map("leave_logs")
+}
+
+enum TransferRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// A submitted-but-not-yet-applied transfer. Nothing on checklist_entries or
+// delegation_tasks changes until an admin approves it (see transfer.service.ts
+// executeTransfer()) — approving replays the exact taskCodes/delegationTaskCodes
+// captured here, not a re-derived "everything in range" at approval time.
+model TransferRequest {
+  id                  Int                   @id @default(autoincrement())
+  fromUserId          Int
+  toUserId            Int
+  requestedByUserId   Int
+  startDate           DateTime
+  endDate             DateTime
+  reason              String?
+  taskCodes           String[]
+  delegationTaskCodes String[]
+  transferTemplate    Boolean               @default(false)
+  status              TransferRequestStatus @default(PENDING)
+  reviewedByUserId    Int?
+  reviewedAt          DateTime?
+  reviewNote          String?
+  createdAt           DateTime              @default(now())
+  fromUser            User                  @relation("TransferRequestFrom", fields: [fromUserId], references: [id])
+  toUser              User                  @relation("TransferRequestTo", fields: [toUserId], references: [id])
+  requestedBy         User                  @relation("TransferRequestBy", fields: [requestedByUserId], references: [id])
+  reviewedBy          User?                 @relation("TransferRequestReviewedBy", fields: [reviewedByUserId], references: [id])
+
+  @@index([status, createdAt])
+  @@index([fromUserId])
+  @@map("transfer_requests")
+}
+
+model OtpJob {
+  id                   Int             @id @default(autoincrement())
+  jobId                String          @unique
+  // Not @unique: one project can have multiple jobs (e.g. repeat bookings
+  // under the same vsnapu project id) — only jobId is guaranteed unique.
+  projectId            String
+  client               String
+  jobGenre             String
+  customIdName         String?
+  customId             String?
+  salesExecutive       String
+  jobDate              DateTime        @db.Date
+  // Nullable: the vsnapu source frequently has no delivery date set yet at
+  // job-creation time (62% of a sampled range) — not an edge case.
+  deliveryDate         DateTime?       @db.Date
+  jobTime              String
+  pocName              String
+  pocContact           String
+  pocWhatsapp          String?
+  pocEmail             String?
+  poc2ndEmail          String?
+  jobCity              String
+  jobShootAddress      String
+  jobSpecification     String?
+  deliverables         String?
+  packageAmount        Decimal         @db.Decimal(12, 2)
+  operationsCost       Decimal         @db.Decimal(12, 2)
+  taxableAmount        Decimal         @db.Decimal(12, 2)
+  gst                  Decimal         @db.Decimal(12, 2)
+  packageAmountWithTax Decimal         @db.Decimal(12, 2)
+  isTokenReceived      Boolean         @default(false)
+  // Denormalized from the ASSIGN_MEMBER stage event so every stage's
+  // Pending/History list can filter by member. A free-text vsnapu stakeholder
+  // name, not a User FK — the upstream feed has no user identity to link to.
+  assignedMember       String?
+  currentStage         OtpJobStage     @default(ORDER_RECEIVED)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  stageEvents          OtpStageEvent[]
+
+  @@index([currentStage])
+  @@index([jobDate])
+  @@index([projectId])
+  @@index([assignedMember])
+  @@map("otp_jobs")
+}
+
+model OtpStageEvent {
+  id          Int         @id @default(autoincrement())
+  otpJobId    Int
+  stage       OtpJobStage
+  data        Json
+  // Who performed this stage advance — captured server-side from the
+  // authenticated session at advanceStage() time, never client-suppliable.
+  // Nullable because events created before this field existed have no actor
+  // to backfill. Powers MIS's Order To Payment work-volume calculation.
+  actorUserId Int?
+  createdAt   DateTime    @default(now())
+  otpJob      OtpJob      @relation(fields: [otpJobId], references: [id], onDelete: Cascade)
+  actor       User?       @relation("OtpStageEventActor", fields: [actorUserId], references: [id])
+
+  @@index([otpJobId])
+  @@index([stage])
+  @@index([actorUserId, createdAt])
+  @@map("otp_stage_events")
+}
+
+model PipelineJob {
+  id                     Int                  @id @default(autoincrement())
+  pipelineType           PipelineType
+  jobId                  String               @unique
+  projectId              String?
+  client                 String
+  jobGenre               String?
+  customIdName           String?
+  customId               String?
+  salesExecutive         String?
+  jobDate                DateTime?            @db.Date
+  deliveryDate           DateTime?            @db.Date
+  jobTime                String?
+  pocName                String?
+  pocContact             String?
+  pocWhatsapp            String?
+  pocEmail               String?
+  poc2ndEmail            String?
+  jobCity                String?
+  jobShootAddress        String?
+  jobSpecification       String?
+  deliverables           String?
+  // Political (Job Cards) identity fields — nullable, unused by OTP/PMS.
+  // `client` still holds this record's display name for Political too (set to
+  // `projectName`'s value on create) so every pipelineType has one consistent
+  // "what is this row" field — see docs/migration/DECISIONS.md.
+  projectName            String?
+  type                   String?
+  voiceover              String?
+  ideaDetails            String?
+  attachmentLink         String?
+  editorName             String?
+  voiceoverPersonName    String?
+  projectCoordinatorName String?
+  pcEmail                String?
+  // Carried over from the originating OtpJob at the OTP -> PMS hand-off, so
+  // PMS's stage lists can filter by the same member OTP assigned. Unused by
+  // Political, which has no Assign Member stage.
+  assignedMember         String?
+  currentStage           String
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+  stageEvents            PipelineStageEvent[]
+  // Political only: which Project Order this Job Card was created under.
+  // Nullable because pre-existing rows (created before this FK existed) have
+  // no parent Project Order to point to — see docs/migration/DECISIONS.md.
+  // Always non-null for new Political rows (enforced at the Zod boundary,
+  // not the DB, so legacy rows aren't retroactively invalidated).
+  politicalProjectOrderId Int?
+  politicalProjectOrder   PoliticalProjectOrder? @relation(fields: [politicalProjectOrderId], references: [id])
+
+  @@index([pipelineType, currentStage])
+  @@index([politicalProjectOrderId])
+  @@index([assignedMember])
+  @@map("pipeline_jobs")
+}
+
+model PipelineStageEvent {
+  id            Int         @id @default(autoincrement())
+  pipelineJobId Int
+  stage         String
+  data          Json
+  // Who performed this stage advance — same actor-capture convention as
+  // OtpStageEvent.actorUserId; shared by both PMS and Political since they
+  // share this table (discriminated via pipelineJob.pipelineType).
+  actorUserId   Int?
+  createdAt     DateTime    @default(now())
+  pipelineJob   PipelineJob @relation(fields: [pipelineJobId], references: [id], onDelete: Cascade)
+  actor         User?       @relation("PipelineStageEventActor", fields: [actorUserId], references: [id])
+
+  @@index([pipelineJobId])
+  @@index([stage])
+  @@index([actorUserId, createdAt])
+  @@map("pipeline_stage_events")
+}
+
+// Political only: the real parent entity a Job Card (PipelineJob) is created
+// under. Previously "Project Order" was just the first stage of a
+// PipelineJob row (1 Project Order == 1 Job Card, structurally). This model
+// makes Project Order a standalone, listable record that many Job Cards can
+// reference, so a single Project Order can have many Job Cards over time.
+// Fields mirror the Project Order form fields already live in
+// pipelineJob.schemas.ts's (now removed) createPoliticalJobSchema.
+model PoliticalProjectOrder {
+  id                      Int          @id @default(autoincrement())
+  // "PRJ-00001" — same count()+1 / zero-pad convention as PipelineJob.jobId
+  // and every other business id in this codebase (see DECISIONS.md's
+  // UUID-rejection entry). Not related to OTP's own, differently-shaped
+  // no-dash projectId ("PRJ00001") on OtpJob — different table, different id space.
+  projectOrderId          String       @unique
+  projectName             String
+  reportingPersonName     String?
+  reportingPersonWhatsapp String?
+  reportingGroupName      String?
+  instagramPages          String?
+  currentFollowers        String?
+  openingViews            String?
+  monthlyViewsTarget      String?
+  remarks                 String?
+  createdByUserId         Int?
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
+  jobCards                PipelineJob[]
+  createdBy               User?        @relation("PoliticalProjectOrderCreatedBy", fields: [createdByUserId], references: [id])
+
+  @@index([createdAt])
+  @@map("political_project_orders")
+}
+
+// HR-SS Recruitment Pipeline enums and models (Phase A foundation)
+enum HrGender {
+  MALE
+  FEMALE
+  ANY
+}
+
+enum VacancyPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum VacancyStatus {
+  NEED_MORE
+  INTERVIEWING
+  ON_HOLD
+  CLOSED
+}
+
+enum VacancyApprovalStatus {
+  PENDING
+  PENDING_HR
+  APPROVED
+  REJECTED
+}
+
+enum JobApplicationSource {
+  INTERNAL
+  EXTERNAL
+}
+
+enum JobApplicationStage {
+  APPLIED
+  FOLLOW_UP
+  INTERVIEW
+  SELECTED
+  OFFER_RELEASED
+  OFFER_ACCEPTED
+  OFFER_DECLINED
+  VERIFIED
+  HIRED
+  REJECTED
+  ON_HOLD
+  RESIGNED
+}
+
+model HrDepartment {
+  id           Int           @id @default(autoincrement())
+  name         String        @unique
+  hodName      String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  designations Designation[]
+
+  @@map("hr_departments")
+}
+
+model Designation {
+  id           Int          @id @default(autoincrement())
+  name         String
+  departmentId Int
+  createdAt    DateTime     @default(now())
+  department   HrDepartment @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  vacancies    Vacancy[]
+  employees    Employee[]
+
+  @@index([departmentId])
+  @@map("designations")
+}
+
+model Vacancy {
+  id                     Int                   @id @default(autoincrement())
+  vacancyNumber          String                @unique
+  shareToken             String                @unique
+  vacancyName            String?
+  designationId          Int
+  gender                 HrGender
+  numberOfPosts          Int
+  completionDate         DateTime
+  salaryCriteria         String?
+  jobDescription         String?
+  preferredQualification String?
+  preferredLocation      String?
+  preferredExperience    String?
+  experienceRequired     Boolean               @default(false)
+  socialPlatforms        String?
+  postingLinks           Json?
+  priority               VacancyPriority       @default(MEDIUM)
+  status                 VacancyStatus         @default(NEED_MORE)
+  approvalStatus         VacancyApprovalStatus @default(PENDING)
+  rejectionRemark        String?
+  remarks                String?
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  designation            Designation           @relation(fields: [designationId], references: [id])
+  jobApplications        JobApplication[]
+  employees              Employee[]
+
+  @@index([status])
+  @@index([approvalStatus])
+  @@map("vacancies")
+}
+
+model JobApplication {
+  id                          Int                  @id @default(autoincrement())
+  applicationNumber           String               @unique
+  vacancyId                   Int
+  source                      JobApplicationSource @default(EXTERNAL)
+  stage                       JobApplicationStage  @default(APPLIED)
+  nextFollowUpDate            DateTime?
+  interviewDate               DateTime?
+  interviewMode               String?
+  interviewRemark             String?
+  selectionRemark             String?
+  offeredDesignation          String?
+  offeredSalary               Decimal?             @db.Decimal(12, 2)
+  offeredBaseSalary           Decimal?             @db.Decimal(12, 2)
+  offeredAllowanceSalary      Decimal?             @db.Decimal(12, 2)
+  offeredJoiningDate          DateTime?
+  offerStatus                 String?
+  offerRemark                 String?
+  documentChecklist           Json?
+  documentsVerified           Boolean              @default(false)
+  verificationRemark          String?
+  candidateName               String
+  candidateDob                DateTime?
+  candidatePhone              String
+  candidateEmail              String?
+  maritalStatus               String?
+  presentAddress              String?
+  aadharNo                    String?
+  previousCompany             String?
+  previousCompanyNoticePeriod String?
+  jobExperience               String?
+  lastSalary                  Decimal?             @db.Decimal(12, 2)
+  previousPosition            String?
+  reasonForLeaving            String?
+  lastEmployerMobile          String?
+  referenceBy                 String?
+  candidatePhoto              String?
+  candidateResume             String?
+  salarySlip                  String?
+  experienceLetter            String?
+  relievingLetter             String?
+  remarks                     String?
+  // Who logged this application — same actor-capture convention as the
+  // other HR models above. JobApplication has no stage-advance endpoint
+  // today (only create/list/getById), so this only ever reflects who
+  // created the record, not who progressed it through the funnel.
+  createdByUserId             Int?
+  createdAt                   DateTime             @default(now())
+  updatedAt                   DateTime             @updatedAt
+  vacancy                     Vacancy              @relation(fields: [vacancyId], references: [id], onDelete: Cascade)
+  employee                    Employee?
+  createdBy                   User?                @relation("JobApplicationCreatedBy", fields: [createdByUserId], references: [id])
+
+  @@index([vacancyId])
+  @@index([stage])
+  @@index([createdByUserId, createdAt])
+  @@map("job_applications")
+}
+
+// HR employee master roster (Module #42). Source (Master/src/pages/HR/Employee.jsx)
+// has no creation form — only a read-only "joining" listing backed by mock data
+// (`EMPLOYEES` in hrDummyData.js) — so `create()` is new functionality, per the
+// same precedent as Order Received/Sales Team/Job Cards. `companyName` is kept
+// as a plain field (not linked to the existing `Department` model) since it's
+// not confirmed to be the same concept — see docs/migration/DECISIONS.md.
+// Employee.jsx's own "leaving" tab and the separate `Leaving` page's mark-as-left
+// workflow (Module #47) are deferred; no leaving-specific columns exist yet.
+model Employee {
+  id                  Int                  @id @default(autoincrement())
+  joiningNo           String               @unique
+  // HR-SS: separate employee code field (in addition to joiningNo for backward compat)
+  employeeCode        String?              @unique
+  candidateName       String
+  fatherName          String?
+  dateOfJoining       DateTime             @db.Date
+  joiningPlace        String?
+  designation         String // Master: string designation
+  // HR-SS: FK to Designation (optional, for future use)
+  designationId       Int?
+  salary              Decimal              @db.Decimal(12, 2)
+  // HR-SS: split salary fields
+  baseSalary          Decimal?             @db.Decimal(12, 2)
+  allowanceSalary     Decimal?             @db.Decimal(12, 2)
+  mobileNo            String
+  familyMobileNo      String?
+  relationWithFamily  String?
+  email               String?
+  companyName         String?
+  status              String               @default("Active")
+  gender              String?
+  aadharNo            String?
+  currentAddress      String?
+  // HR-SS: additional address fields
+  presentAddress      String? // HR-SS: same as currentAddress but separate field
+  aadharAddress       String? // HR-SS: address from aadhar
+  addressAsPerAadhar  String?
+  bodAsPerAadhar      DateTime?            @db.Date
+  // HR-SS: date of birth (separate from bodAsPerAadhar which comes from aadhar)
+  dateOfBirth         DateTime?            @db.Date
+  // HR-SS: marital status
+  maritalStatus       String?
+  // HR-SS: employment type
+  employmentType      String?
+  pfEligible          String?
+  esicEligible        String?
+  accountNo           String?
+  ifscCode            String?
+  branchName          String?
+  paymentMode         String?
+  modeOfAttendance    String?
+  qualification       String?
+  // HR-SS: vacancy linkage (for recruitment pipeline)
+  vacancyId           Int?
+  jobApplicationId    Int?                 @unique
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  onboardingChecklist OnboardingChecklist?
+  leavingRecord       LeavingRecord?
+  leaveRequests       LeaveRequest[]
+  monthlyAttendance   MonthlyAttendance[]
+  dailyAttendance     DailyAttendance[]
+  linkedUser          User?
+  payrollEntries      PayrollEntry[]
+  designationRef      Designation?         @relation(fields: [designationId], references: [id])
+  vacancyRef          Vacancy?             @relation(fields: [vacancyId], references: [id])
+  jobApplication      JobApplication?      @relation(fields: [jobApplicationId], references: [id])
+
+  @@index([status])
+  @@index([employeeCode])
+  @@map("employees")
+}
+
+// HR onboarding checklist (Module #46). Source (Master/src/pages/HR/
+// AfterJoiningWork.jsx) has a fixed 8-item checklist (not user-configurable)
+// applied to a new employee. Its own "Pending" list is `EMPLOYEES.filter(e =>
+// e.status === 'Active')` re-evaluated fresh on every load with no persisted
+// completion flag — meaning in the source itself, a completed employee would
+// reappear in Pending after a page refresh (the "done" list is local
+// component state only, discarded on reload). This migration fixes that by
+// persisting completion as a real `OnboardingChecklist` row (`employeeId`
+// unique — one checklist per employee) rather than relying on `Employee`'s
+// own `status` field (which already means Active/Left, a different concept)
+// — see docs/migration/DECISIONS.md.
+model OnboardingChecklist {
+  id                    Int      @id @default(autoincrement())
+  employeeId            Int      @unique
+  checkSalarySlipResume Boolean  @default(false)
+  offerLetterReceived   Boolean  @default(false)
+  welcomeMeeting        Boolean  @default(false)
+  biometricAccess       Boolean  @default(false)
+  officialEmailId       Boolean  @default(false)
+  assignAssets          Boolean  @default(false)
+  pfEsic                Boolean  @default(false)
+  companyDirectory      Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  employee              Employee @relation(fields: [employeeId], references: [id])
+
+  @@map("onboarding_checklists")
+}
+
+// HR leaving record (Module #47). Source (Master/src/pages/HR/Leaving.jsx)
+// has a "Mark Leaving" form (dateOfLeaving, mobileNumber, reasonOfLeaving)
+// over the same `EMPLOYEES.filter(e => e.status === 'Active')` Pending list
+// as AfterJoiningWork — but never actually updates `status`, so (mirroring
+// Module #46's bug) a left employee would keep reappearing as Active/Pending
+// forever in the source. This migration fixes that the same way Module #46
+// did: `employeeId` is unique (one leaving record per employee), and
+// `leavingRecordService.create` sets `Employee.status = "Left"` in the same
+// transaction — finally giving that pre-existing field (added in Module #42,
+// always defaulted to "Active", never previously changed) a real purpose.
+// Source's `plannedDate`/`actual` fields are always identical to
+// `dateOfLeaving` (never independently set) and never rendered anywhere —
+// dead duplicate data, not ported; see docs/migration/DECISIONS.md.
+model LeavingRecord {
+  id                   Int                   @id @default(autoincrement())
+  employeeId           Int                   @unique
+  dateOfLeaving        DateTime              @db.Date
+  mobileNumber         String?
+  reasonOfLeaving      String
+  createdAt            DateTime              @default(now())
+  employee             Employee              @relation(fields: [employeeId], references: [id])
+  offboardingChecklist OffboardingChecklist?
+
+  @@map("leaving_records")
+}
+
+// HR offboarding checklist (Module #48). Source (Master/src/pages/HR/
+// AfterLeavingWork.jsx) has a fixed 8-item checklist (task set is different
+// from Module #46's onboarding checklist) plus a `finalReleaseDate` field,
+// applied over `LEAVING_EMPLOYEES` unconditionally — the source has no
+// Pending/History tab split at all here (unlike AfterJoiningWork.jsx), and
+// `handleSubmit` only removes the employee from local `pending` state with
+// no persisted "done" record whatsoever — not even the ephemeral local
+// `done` array Module #46's source had. This migration fixes that the same
+// way #46/#47 did: a real, persisted record (`leavingRecordId` unique — one
+// checklist per leaving record) plus an added History view, consistent with
+// every other Pending/History module built in this migration; see
+// docs/migration/DECISIONS.md. `finalReleaseDate` is optional — the source's
+// own "Mark Complete" button has no `disabled` guard on it at all, unlike
+// Leaving.jsx's form, so nothing in the source requires it to be filled in.
+model OffboardingChecklist {
+  id                        Int           @id @default(autoincrement())
+  leavingRecordId           Int           @unique
+  resignationLetterReceived Boolean       @default(false)
+  resignationAcceptance     Boolean       @default(false)
+  handoverOfAssets          Boolean       @default(false)
+  idCard                    Boolean       @default(false)
+  visitingCard              Boolean       @default(false)
+  cancellationOfEmailId     Boolean       @default(false)
+  biometricAccess           Boolean       @default(false)
+  removeBenefitEnrollment   Boolean       @default(false)
+  finalReleaseDate          DateTime?     @db.Date
+  createdAt                 DateTime      @default(now())
+  leavingRecord             LeavingRecord @relation(fields: [leavingRecordId], references: [id])
+
+  @@map("offboarding_checklists")
+}
+
+// HR self-service leave request (Module #49). Source (Master/src/pages/HR/
+// LeaveRequest.jsx) hardcodes its own view to a single demo employee
+// ("EMP001") via an explicit `// Show EMP001's leaves for demo` comment —
+// there is no real session-to-employee identity link anywhere in Master, and
+// none exists yet in this backend either (`User` and `Employee` are wholly
+// separate models with no FK between them). Rather than silently inventing a
+// `User.employeeId` linkage (an architecture decision affecting 3 more
+// upcoming self-service modules: My Attendance #53, My Salary #55, My
+// Profile #56) or hardcoding one specific employee into production code,
+// this migration ports the real business logic (leave types, balance math,
+// inclusive day-count formula, create form) scoped by an explicit
+// `employeeId`, the same way every other HR module in this migration is
+// scoped — see docs/migration/DECISIONS.md for the full reasoning and the
+// deferred session-identity question.
+model LeaveRequest {
+  id         Int      @id @default(autoincrement())
+  serialNo   String   @unique
+  employeeId Int
+  leaveType  String
+  fromDate   DateTime @db.Date
+  toDate     DateTime @db.Date
+  days       Int
+  reason     String
+  status     String   @default("Pending")
+  createdAt  DateTime @default(now())
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId])
+  @@map("leave_requests")
+}
+
+// HR monthly attendance summary (Module #51). Source (Master/src/pages/HR/
+// Attendance.jsx) reads a flat, pre-computed `ATTENDANCE_MONTHLY` array — a
+// separate, independently hand-authored mock dataset from `ATTENDANCE_DAILY`
+// (Module #52's source), not something Attendance.jsx itself derives via any
+// aggregation formula. Investigated whether monthly summaries should instead
+// be a live aggregation over a future daily-punch model (mirroring how
+// MyAttendance.jsx, Module #53, does compute its own stats from daily
+// records) — rejected for this module specifically, because two of the
+// mock's own fields (`lateNotAllowed`/`lateAllowed`) reflect an unstated
+// late-arrival policy split with no derivable formula anywhere in the source;
+// fabricating one would be inventing a business rule. `MonthlyAttendance` is
+// therefore its own standalone model, matching the source's own flat table
+// shape exactly, unique per employee per month — see
+// docs/migration/DECISIONS.md. Read-only in the source (no creation form
+// anywhere in Master for any attendance data — it's implicitly
+// externally-supplied, e.g. by a biometric system, which is out of this
+// migration's scope); a create endpoint still exists here only for the
+// eventual real data-ingestion path, matching this backend's own
+// Controller→Service→Prisma convention for every other model.
+model MonthlyAttendance {
+  id             Int      @id @default(autoincrement())
+  employeeId     Int
+  year           Int
+  month          String
+  punchDays      Int
+  totalOnTime    Int
+  lateDays       Int
+  lateNotAllowed Int
+  lateAllowed    Int
+  punchMiss      Int
+  holidays       Int
+  absents        Int
+  totalWorking   Int
+  mgmtAdjustment Int      @default(0)
+  grandTotalDays Int
+  createdAt      DateTime @default(now())
+  employee       Employee @relation(fields: [employeeId], references: [id])
+
+  @@unique([employeeId, year, month])
+  @@map("monthly_attendance")
+}
+
+// HR daily attendance log (Module #52). Source (Master/src/pages/HR/
+// AttendanceDaily.jsx) is a flat, read-only punch log — search + start/end
+// date range filter over `ATTENDANCE_DAILY`, plus a non-functional "Download"
+// button (no `onClick` anywhere, same finding as Module #51's "Download
+// Excel" — not ported, see docs/migration/DECISIONS.md). Confirmed
+// independent of `MonthlyAttendance` (#51) during that module's own combined
+// Observe pass — the two source datasets don't derive from one another in
+// `Master`; see the Module #51 decision on this. `companyName`/`name`/
+// `designation` from the source's own denormalized row shape are not
+// persisted here as separate columns — all three are already reachable via
+// the `employee` relation, matching the same reasoning already applied to
+// `MonthlyAttendance` skipping its own `company` field. `day` (day of week)
+// is kept as its own literal field rather than derived from `date` at read
+// time, matching the source's own denormalized shape. No creation form in
+// source (attendance data is implicitly externally-supplied) — same as #51.
+model DailyAttendance {
+  id            Int      @id @default(autoincrement())
+  employeeId    Int
+  year          Int
+  month         String
+  date          DateTime @db.Date
+  day           String
+  holiday       String
+  workingDay    String
+  nHoliday      String
+  status        String
+  inTime        String?
+  outTime       String?
+  workingHours  String
+  lateMinutes   Int      @default(0)
+  earlyOut      Int      @default(0)
+  overtimeHours String
+  punchMiss     String
+  remarks       String?
+  createdAt     DateTime @default(now())
+  employee      Employee @relation(fields: [employeeId], references: [id])
+
+  @@unique([employeeId, date])
+  @@map("daily_attendance")
+}
+
+// HR payroll (Module #54, admin). Source (Master/src/pages/HR/Payroll.jsx)
+// has a real "New Payroll Entry" create form — ported as-is, not a new
+// addition. `gross`/`totalDeductions`/`netSalary` are computed server-side
+// from the exact formula found in the source (Payroll.jsx:24-26):
+// gross = basicSalary + lta + bonus + otherAllowances + overtime;
+// totalDeductions = pf + loan + otherDeductions; netSalary = gross -
+// totalDeductions. Unique per employee+year+month, matching the same
+// monthly-scoped-record precedent as `MonthlyAttendance` (#51). Source's own
+// "Export" and "Download Payslip" buttons have no `onClick` handler
+// anywhere — non-functional, not ported, matching the Attendance modules'
+// (#51/#52) established precedent; see docs/migration/DECISIONS.md.
+model PayrollEntry {
+  id              Int       @id @default(autoincrement())
+  employeeId      Int
+  year            String
+  month           String
+  basicSalary     Decimal   @db.Decimal(12, 2)
+  lta             Decimal   @default(0) @db.Decimal(12, 2)
+  bonus           Decimal   @default(0) @db.Decimal(12, 2)
+  otherAllowances Decimal   @default(0) @db.Decimal(12, 2)
+  overtime        Decimal   @default(0) @db.Decimal(12, 2)
+  gross           Decimal   @db.Decimal(12, 2)
+  pf              Decimal   @default(0) @db.Decimal(12, 2)
+  loan            Decimal   @default(0) @db.Decimal(12, 2)
+  otherDeductions Decimal   @default(0) @db.Decimal(12, 2)
+  totalDeductions Decimal   @db.Decimal(12, 2)
+  netSalary       Decimal   @db.Decimal(12, 2)
+  status          String    @default("Pending")
+  payDate         DateTime? @db.Date
+  createdAt       DateTime  @default(now())
+  employee        Employee  @relation(fields: [employeeId], references: [id])
+
+  @@unique([employeeId, year, month])
+  @@map("payroll_entries")
+}
+
+// HR company events calendar (Module #59, last HR module). Source
+// (Master/src/pages/HR/CompanyCalendar.jsx) is a month-grid calendar of
+// company events (meetings, holidays, trainings, reviews, general events)
+// read from `COMPANY_CALENDAR_EVENTS` — genuinely distinct from this app's
+// existing `Holiday` model (which only excludes dates from checklist task
+// generation, no title/type/time/location/description) and from the
+// existing checklist/delegation calendar feature (which shows task due
+// dates, not company events) — confirmed no reuse opportunity, see
+// docs/migration/DECISIONS.md. Unlike Attendance/MIS Report's
+// externally-supplied read-only data, company events are realistically
+// hand-entered by an HR admin with no external data source, so — mirroring
+// the Order Received/Employee precedent — this migration adds a real
+// "Add Event" creation form even though the source has none.
+model CompanyCalendarEvent {
+  id          Int      @id @default(autoincrement())
+  title       String
+  date        DateTime @db.Date
+  time        String?
+  location    String?
+  type        String
+  description String?
+  createdAt   DateTime @default(now())
+
+  @@map("company_calendar_events")
+}
+
+// HR hiring requisition (Module #43). Unlike Employee, source
+// (Master/src/pages/HR/Indent.jsx) already has a real "Create Indent" form —
+// ported as-is, not a new addition. `status` always starts "Open" on create;
+// there is no "close"/status-change action anywhere in the source.
+model Indent {
+  id              Int       @id @default(autoincrement())
+  indentNumber    String    @unique
+  post            String
+  gender          String    @default("Male")
+  prefer          String    @default("Fresher")
+  noOfPost        Int
+  completionDate  DateTime  @db.Date
+  socialSite      String    @default("LinkedIn")
+  status          String    @default("Open")
+  // Who raised this indent — captured server-side at create() time. Nullable
+  // because rows created before this field existed have no actor to
+  // backfill. Powers MIS's HR work-volume calculation.
+  createdByUserId Int?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  enquiries       Enquiry[]
+  createdBy       User?     @relation("IndentCreatedBy", fields: [createdByUserId], references: [id])
+
+  @@index([status])
+  @@index([createdByUserId, createdAt])
+  @@map("indents")
+}
+
+// HR candidate enquiry (Module #44). Source (Master/src/pages/HR/FindEnquiry.jsx)
+// has a real "Add Enquiry" form, only reachable from an Open Indent's own
+// "Pending" row — so `indentId` is a real FK (not just a copied string), while
+// `indentNo`/`applyingForPost` are still denormalized snapshot fields, exactly
+// matching the source object literal (`indentNo: selectedIndent.indentNumber,
+// applyingForPost: selectedIndent.post`). `status` is set by the recruiter at
+// creation time via a dropdown (Pending/Shortlisted/Selected/Rejected) — not a
+// stage that advances on its own. The `FOLLOW_UPS` mock data and its own
+// Interested/Joined/Not Interested status belong to the separate Call Tracker
+// page (Module #45), not here — confirmed by reading both source files.
+model Enquiry {
+  id                 Int        @id @default(autoincrement())
+  candidateEnquiryNo String     @unique
+  indentId           Int
+  indentNo           String
+  applyingForPost    String
+  candidateName      String
+  candidateDOB       DateTime?  @db.Date
+  candidatePhone     String
+  candidateEmail     String?
+  previousCompany    String?
+  jobExperience      String?
+  previousPosition   String?
+  maritalStatus      String     @default("Single")
+  presentAddress     String?
+  aadharNo           String?
+  status             String     @default("Pending")
+  // Who logged this enquiry — same actor-capture convention as Indent above.
+  createdByUserId    Int?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  indent             Indent     @relation(fields: [indentId], references: [id])
+  followUps          FollowUp[]
+  createdBy          User?      @relation("EnquiryCreatedBy", fields: [createdByUserId], references: [id])
+
+  @@index([status])
+  @@index([indentId])
+  @@index([createdByUserId, createdAt])
+  @@map("enquiries")
+}
+
+// HR call-log entry (Module #45). Source (Master/src/pages/HR/CallTracker.jsx)
+// has no "pending" concept at all — its own "Pending" tab lists every Enquiry
+// unconditionally (always callable again, no state change on the enquiry
+// itself), while "History" is a pure, ever-growing append-only log of calls
+// made. `FollowUp.status` (Interested/Not Interested/Joined/Call Back Later)
+// is a completely separate concept from `Enquiry.status`
+// (Pending/Shortlisted/Selected/Rejected) — the source's own handleSubmit
+// never touches the enquiry record, only appends to the follow-up log, so
+// this migration doesn't sync them either. `nextDate` is only ever populated
+// when `status` is "Call Back Later" (the source only shows that input
+// conditionally) — kept nullable rather than required.
+model FollowUp {
+  id              Int       @id @default(autoincrement())
+  enquiryId       Int
+  enquiryNo       String
+  status          String    @default("Interested")
+  candidateSays   String
+  nextDate        DateTime? @db.Date
+  // Who logged this call — same actor-capture convention as Indent/Enquiry.
+  createdByUserId Int?
+  createdAt       DateTime  @default(now())
+  enquiry         Enquiry   @relation(fields: [enquiryId], references: [id])
+  createdBy       User?     @relation("FollowUpCreatedBy", fields: [createdByUserId], references: [id])
+
+  @@index([enquiryId])
+  @@index([createdByUserId, createdAt])
+  @@map("follow_ups")
+}
 
 model SystemSettings {
-  id          Int     @id @default(1) // singleton row
+  id          Int     @id @default(1)
   skipSundays Boolean @default(true)
 
   @@map("system_settings")
 }
 
-// ─────────────────────────────────────────
-// HOLIDAYS / WORKING DAY CALENDAR
-// ─────────────────────────────────────────
-
 model Holiday {
   id        Int      @id @default(autoincrement())
-  date      DateTime @db.Date
+  date      DateTime @unique @db.Date
   name      String
   createdAt DateTime @default(now())
 
-  @@unique([date])
   @@map("holidays")
 }
-
-// ─────────────────────────────────────────
-// ATTENDANCE LOG
-// ─────────────────────────────────────────
 
 model AttendanceLog {
   id        BigInt   @id @default(autoincrement())
   userId    Int
-  user      User     @relation(fields: [userId], references: [id])
   loginAt   DateTime @default(now())
   ipAddress String?
+  user      User     @relation(fields: [userId], references: [id])
 
   @@index([userId, loginAt])
   @@map("attendance_logs")
 }
 
-// ─────────────────────────────────────────
-// ENUMS
-// ─────────────────────────────────────────
+// MIS rebuild (2026-07-17, replacing the removed MisRecord/MisArchivedCommitment
+// system). "Actual work done" is never stored — it's always computed live from
+// each system's own tables (checklist.service.ts/delegation.service.ts's
+// existing stats methods, or the new actor-tracked event/creation rows added
+// alongside this model) for whatever week is being viewed, current or past.
+// The only thing that genuinely can't be auto-calculated is the target (a
+// goal), so that's the only thing this table stores. One row per
+// user+system+week, only created once a target is actually set for that
+// combination — see docs/migration/DECISIONS.md.
+model MisWeeklyTarget {
+  id          Int          @id @default(autoincrement())
+  userId      Int
+  systemKey   MisSystemKey
+  weekStart   DateTime     @db.Date
+  weekEnd     DateTime     @db.Date
+  // Nullable: a row may exist holding only next-week planning fields
+  // (submitted via "Submit Selection") before an admin sets its target.
+  target      Int?
+  // Manual planning fields for the week this row covers — entered the week
+  // before via the dashboard's editable next-week cells (ports the old
+  // Master "Submit Selection" flow). Actuals stay auto-calculated; these are
+  // the one thing that can't be computed: stated intent.
+  plannedNotDonePct       Int?
+  plannedNotDoneOnTimePct Int?
+  commitment              String?
+  setByUserId Int
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  user        User         @relation("MisTargetForUser", fields: [userId], references: [id])
+  setBy       User         @relation("MisTargetSetBy", fields: [setByUserId], references: [id])
+
+  @@unique([userId, systemKey, weekStart])
+  @@index([systemKey, weekStart])
+  @@map("mis_weekly_targets")
+}
+
+enum MisSystemKey {
+  CHECKLIST_DELEGATION
+  ORDER_TO_PAYMENT
+  PMS
+  POLITICAL
+  HR
+}
 
 enum Role {
   ADMIN
@@ -313,4 +1224,32 @@ enum CompletionStatus {
 enum HistoryStatus {
   DONE
   EXTEND_DATE
+}
+
+enum DelegationReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum OtpJobStage {
+  ORDER_RECEIVED
+  ASSIGN_MEMBER
+  RE_CONFIRMATION
+  PHOTOGRAPHER_ALLOTMENT
+  PHOTOGRAPHER_SEARCH
+  FINAL_PHOTOGRAPHER
+  PHOTOGRAPHER_BRIEFING
+  MAKE_TOKEN
+  STORY_BRIEFING
+  MOODBOARD_CREATION
+  CLIENT_BRIEFING_BEFORE_SHOOT
+  PHOTOGRAPHER_BRIEFING_BEFORE_SHOOT
+  MOODBOARD_DELIVERY_TO_CLIENT
+  COMPLETED
+}
+
+enum PipelineType {
+  PMS
+  POLITICAL
 }
